@@ -284,18 +284,35 @@ int connection_can_read(const connection_t *conn) {
     
     /* Can't read if we're not in a readable state.
      * CONN_CONNECTING: waiting for connect() to complete
-     * CONN_CLOSING: shutting down
+     * CONN_CLOSING: shutting down (if defined)
      * CONN_CLOSED: already closed
+     * 
+     * Readable states:
+     * - CONN_CONNECTED: Normal TCP mode, actively reading/writing
+     * - CONN_READING_REQUEST: HTTP mode, reading HTTP request from client
+     * - CONN_REQUEST_COMPLETE: HTTP mode, request fully read (transitional)
+     * 
+     * Non-readable states:
+     * - CONN_CONNECTING: Still establishing connection
+     * - CONN_WRITING_RESPONSE: HTTP mode, writing response to client (backend done reading)
      */
-    if (conn->state != CONN_CONNECTED && 
-        conn->state != CONN_READING) {
+    if (conn->state == CONN_CONNECTING ||
+        conn->state == CONN_WRITING_RESPONSE) {
         return 0;
     }
     
     /* Can't read if peer doesn't exist.
      * Where would we forward the data?
+     * 
+     * Exception: In HTTP mode, clients can read without a peer initially
+     * (we're reading their request before connecting to backend)
      */
     if (conn->peer == NULL) {
+        /* Allow reading if we're in HTTP request reading state */
+        if (conn->state == CONN_READING_REQUEST || 
+            conn->state == CONN_REQUEST_COMPLETE) {
+            return 1;
+        }
         return 0;
     }
     
@@ -322,10 +339,30 @@ int connection_can_write(const connection_t *conn) {
         return 0;
     }
     
-    /* Can't write if we're not in a writable state */
+    /* Can't write if we're not in a writable state.
+     * 
+     * Writable states:
+     * - CONN_CONNECTED: Normal TCP mode, actively reading/writing
+     * - CONN_WRITING_RESPONSE: HTTP mode, writing response to client
+     * 
+     * Non-writable states:
+     * - CONN_CONNECTING: Still establishing (but see below)
+     * - CONN_READING_REQUEST: HTTP mode, still reading request
+     * - CONN_REQUEST_COMPLETE: HTTP mode, transitional state
+     */
     if (conn->state != CONN_CONNECTED && 
-        conn->state != CONN_WRITING) {
+        conn->state != CONN_CONNECTING &&
+        conn->state != CONN_WRITING_RESPONSE) {
         return 0;
+    }
+    
+    /* Special case: CONN_CONNECTING state
+     * We allow "writing" while connecting because we need EPOLLOUT
+     * to detect when the async connect completes. But we don't
+     * actually write data until state becomes CONN_CONNECTED.
+     */
+    if (conn->state == CONN_CONNECTING) {
+        return 1;  /* Need EPOLLOUT to detect connect completion */
     }
     
     /* Only write if we have data.
