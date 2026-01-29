@@ -1,1 +1,7 @@
-/wrk
+# Ignore local backup folders
+backup_20260129_040455/
+backup_*/
+
+# Ignore build artifacts
+build/
+scripts/
